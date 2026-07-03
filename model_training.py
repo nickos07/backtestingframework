@@ -9,6 +9,8 @@ from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from typing import Tuple
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
 
 from feature_engineering import TechnicalIndicators
 
@@ -270,19 +272,57 @@ def evaluate_model(
     return metrics
 
 
-def plot_feature_importance(metrics: dict):
+def backtest_strategy(model: XGBClassifier, X_test: pd.DataFrame) -> pd.DataFrame:
     """
-    Plot model feature importances using a horizontal bar chart.
+    Generate a backtest DataFrame comparing buy-and-hold returns with
+    strategy returns based on the previous day's model signal.
     """
-    importance_df = metrics['feature_importance'].copy()
-    importance_df = importance_df.sort_values('Importance', ascending=True)
+    backtest_df = X_test.copy()
+    backtest_df['Predicted_Signal'] = model.predict(X_test)
+    backtest_df['Buy_and_Hold_Returns'] = backtest_df['Daily_Return']
+    backtest_df['Strategy_Returns'] = (
+        backtest_df['Buy_and_Hold_Returns'] * backtest_df['Predicted_Signal'].shift(1).fillna(0)
+    )
+    backtest_df['Cumulative_Buy_and_Hold'] = (
+        (1 + backtest_df['Buy_and_Hold_Returns']).cumprod() - 1
+    )
+    backtest_df['Cumulative_Strategy'] = (
+        (1 + backtest_df['Strategy_Returns']).cumprod() - 1
+    )
+    return backtest_df
 
-    plt.figure(figsize=(10, 6))
-    plt.barh(importance_df['Feature'], importance_df['Importance'], color='#2a9d8f')
-    plt.title('Feature Importance - XGBoost')
-    plt.xlabel('Importance')
-    plt.ylabel('Feature')
+
+def plot_backtest(backtest_df: pd.DataFrame, output_path: str = 'models/backtest_returns.png'):
+    """
+    Plot cumulative returns for buy-and-hold versus the strategy and save to PNG.
+    """
+    plt.figure(figsize=(12, 6))
+    plt.plot(
+        backtest_df.index,
+        backtest_df['Cumulative_Buy_and_Hold'],
+        color='gray',
+        label='Buy & Hold'
+    )
+    plt.plot(
+        backtest_df.index,
+        backtest_df['Cumulative_Strategy'],
+        color='green',
+        label='XGBoost Strategy'
+    )
+    plt.title('Backtest: Buy & Hold vs XGBoost Strategy')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Return')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    ax = plt.gca()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.xticks(rotation=45)
     plt.tight_layout()
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300)
+    print(f"[OK] Backtest plot saved to: {output_path}")
     plt.show()
 
 
@@ -443,16 +483,14 @@ def main():
     # Step 6.5: Plot feature importance
     print("\n\nSTEP 6.5: Plot Feature Importance")
     print("-" * 80)
-    plot_feature_importance(metrics)
     
-    # Step 7: Save model
-    print("\n\nSTEP 7: Saving Model")
+    
+    # Step 6.75: Backtest strategy
+    print("\n\nSTEP 6.75: Backtest Strategy")
     print("-" * 80)
-    save_model_results(model, metrics, y_test, output_dir='models')
-    
-    print("\n" + "="*80)
-    print("[OK] MODEL TRAINING PIPELINE COMPLETE")
-    print("="*80)
+    backtest_df = backtest_strategy(model, X_test)
+    plot_backtest(backtest_df, output_path='models/backtest_returns.png')
+
     
     return {
         'model': model,
