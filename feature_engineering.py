@@ -143,6 +143,25 @@ class TechnicalIndicators:
             df_features['Daily_Return'] = TechnicalIndicators.daily_returns(
                 df_features[price_column]
             )
+
+        # Add MACD and Signal line
+        df_features['EMA_12'] = df_features[price_column].ewm(span=12, adjust=False).mean()
+        df_features['EMA_26'] = df_features[price_column].ewm(span=26, adjust=False).mean()
+        df_features['MACD'] = df_features['EMA_12'] - df_features['EMA_26']
+        df_features['MACD_Signal'] = df_features['MACD'].ewm(span=9, adjust=False).mean()
+
+        # Add Bollinger Bands (20-day SMA with 2 standard deviations)
+        bb_window = 20
+        bb_middle = df_features[price_column].rolling(window=bb_window).mean()
+        bb_std = df_features[price_column].rolling(window=bb_window).std()
+        df_features['BB_Upper'] = bb_middle + (2 * bb_std)
+        df_features['BB_Lower'] = bb_middle - (2 * bb_std)
+
+        # Add volume percentage change
+        if 'Volume' in df_features.columns:
+            df_features['Volume_Change'] = df_features['Volume'].pct_change()
+        else:
+            df_features['Volume_Change'] = np.nan
         
         return df_features
 
@@ -199,7 +218,10 @@ def display_feature_statistics(stock_data: dict):
         print(f"\n{ticker}")
         print("-" * 40)
         
-        features = ['SMA_20', 'SMA_50', 'RSI_14', 'Daily_Return']
+        features = [
+            'SMA_20', 'SMA_50', 'RSI_14', 'Daily_Return',
+            'MACD', 'MACD_Signal', 'BB_Upper', 'BB_Lower', 'Volume_Change'
+        ]
         feature_df = df[features].describe().round(4)
         print(feature_df)
         

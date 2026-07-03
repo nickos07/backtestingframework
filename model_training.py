@@ -1,13 +1,16 @@
 """
 Model Training Module - Phase 3: Model Selection and Training
-Builds and evaluates a RandomForestClassifier for stock price prediction.
+Builds and evaluates an XGBClassifier for stock price direction prediction.
 """
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from typing import Tuple
+import matplotlib.pyplot as plt
+
+from feature_engineering import TechnicalIndicators
 
 
 def load_cleaned_data(ticker: str, data_dir: str = 'data') -> pd.DataFrame:
@@ -147,15 +150,17 @@ def chronological_train_test_split(
     return X_train, X_test, y_train, y_test
 
 
-def train_random_forest_model(
+def train_xgboost_model(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     n_estimators: int = 100,
-    max_depth: int = 5,
+    learning_rate: float = 0.05,
+    max_depth: int = 3,
+    subsample: float = 0.8,
     random_state: int = 42
-) -> RandomForestClassifier:
+) -> XGBClassifier:
     """
-    Initialize and train a RandomForestClassifier.
+    Initialize and train an XGBoost classifier.
     
     Parameters:
     -----------
@@ -164,32 +169,41 @@ def train_random_forest_model(
     y_train : pd.Series
         Training target
     n_estimators : int, default=100
-        Number of decision trees in the forest
-    max_depth : int, default=5
-        Maximum depth of each tree
+        Number of boosting rounds
+    learning_rate : float, default=0.05
+        Step size shrinkage
+    max_depth : int, default=3
+        Maximum tree depth
+    subsample : float, default=0.8
+        Fraction of samples used per tree
     random_state : int, default=42
         Random seed for reproducibility
     
     Returns:
     --------
-    RandomForestClassifier
+    XGBClassifier
         Trained model
     """
     
     print(f"\nModel Initialization:")
     print("-" * 60)
-    print(f"Algorithm: RandomForestClassifier")
+    print(f"Algorithm: XGBClassifier")
     print(f"Parameters:")
     print(f"  - n_estimators: {n_estimators}")
+    print(f"  - learning_rate: {learning_rate}")
     print(f"  - max_depth: {max_depth}")
+    print(f"  - subsample: {subsample}")
     print(f"  - random_state: {random_state}")
     
     # Initialize model
-    model = RandomForestClassifier(
+    model = XGBClassifier(
         n_estimators=n_estimators,
+        learning_rate=learning_rate,
         max_depth=max_depth,
+        subsample=subsample,
+        eval_metric='logloss',
         random_state=random_state,
-        n_jobs=-1  # Use all available processors
+        n_jobs=-1
     )
     
     # Train model
@@ -201,7 +215,7 @@ def train_random_forest_model(
 
 
 def evaluate_model(
-    model: RandomForestClassifier,
+    model: XGBClassifier,
     X_test: pd.DataFrame,
     y_test: pd.Series,
     feature_names: list = None
@@ -211,7 +225,7 @@ def evaluate_model(
     
     Parameters:
     -----------
-    model : RandomForestClassifier
+    model : XGBClassifier
         Trained model
     X_test : pd.DataFrame
         Test features
@@ -254,6 +268,22 @@ def evaluate_model(
     }
     
     return metrics
+
+
+def plot_feature_importance(metrics: dict):
+    """
+    Plot model feature importances using a horizontal bar chart.
+    """
+    importance_df = metrics['feature_importance'].copy()
+    importance_df = importance_df.sort_values('Importance', ascending=True)
+
+    plt.figure(figsize=(10, 6))
+    plt.barh(importance_df['Feature'], importance_df['Importance'], color='#2a9d8f')
+    plt.title('Feature Importance - XGBoost')
+    plt.xlabel('Importance')
+    plt.ylabel('Feature')
+    plt.tight_layout()
+    plt.show()
 
 
 def print_evaluation_report(metrics: dict, y_test: pd.Series):
@@ -313,7 +343,7 @@ def print_evaluation_report(metrics: dict, y_test: pd.Series):
 
 
 def save_model_results(
-    model: RandomForestClassifier,
+    model: XGBClassifier,
     metrics: dict,
     y_test: pd.Series,
     output_dir: str = 'models'
@@ -323,7 +353,7 @@ def save_model_results(
     
     Parameters:
     -----------
-    model : RandomForestClassifier
+    model : XGBClassifier
         Trained model
     metrics : dict
         Evaluation metrics
@@ -340,7 +370,7 @@ def save_model_results(
     os.makedirs(output_dir, exist_ok=True)
     
     # Save model
-    model_path = f"{output_dir}/aapl_random_forest_model.pkl"
+    model_path = f"{output_dir}/aapl_xgboost_model.pkl"
     joblib.dump(model, model_path)
     print(f"[OK] Model saved to: {model_path}")
     
@@ -355,18 +385,32 @@ def main():
     
     print("\n" + "="*80)
     print("PHASE 3: MODEL SELECTION AND TRAINING")
-    print("Stock Price Direction Prediction - RandomForest Classifier")
+    print("Stock Price Direction Prediction - XGBoost Classifier")
     print("="*80)
     
     # Step 1: Load data
     print("\n\nSTEP 1: Loading Data")
     print("-" * 80)
     df = load_cleaned_data(ticker='AAPL', data_dir='data')
-    
+
+    # Step 1.5: Ensure advanced technical features exist
+    print("\n\nSTEP 1.5: Generating Advanced Technical Features")
+    print("-" * 80)
+    df = TechnicalIndicators.add_technical_features(
+        df,
+        price_column='Close',
+        sma_windows=[20, 50],
+        rsi_period=14,
+        add_returns=True
+    )
+
     # Step 2: Separate features and target
     print("\n\nSTEP 2: Feature and Target Separation")
     print("-" * 80)
-    feature_cols = ['SMA_20', 'SMA_50', 'RSI_14', 'Daily_Return']
+    feature_cols = [
+        'SMA_20', 'SMA_50', 'RSI_14', 'Daily_Return',
+        'MACD', 'MACD_Signal', 'BB_Upper', 'BB_Lower', 'Volume_Change'
+    ]
     X, y = separate_features_and_target(df, feature_columns=feature_cols)
     
     # Step 3: Chronological train/test split
@@ -379,10 +423,12 @@ def main():
     # Step 4: Train model
     print("\n\nSTEP 4: Model Initialization & Training")
     print("-" * 80)
-    model = train_random_forest_model(
+    model = train_xgboost_model(
         X_train, y_train,
         n_estimators=100,
-        max_depth=5,
+        learning_rate=0.05,
+        max_depth=3,
+        subsample=0.8,
         random_state=42
     )
     
@@ -393,9 +439,14 @@ def main():
     
     # Step 6: Print evaluation report
     print_evaluation_report(metrics, y_test)
+
+    # Step 6.5: Plot feature importance
+    print("\n\nSTEP 6.5: Plot Feature Importance")
+    print("-" * 80)
+    plot_feature_importance(metrics)
     
     # Step 7: Save model
-    print("\n\nSTEP 6: Saving Model")
+    print("\n\nSTEP 7: Saving Model")
     print("-" * 80)
     save_model_results(model, metrics, y_test, output_dir='models')
     
