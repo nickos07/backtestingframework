@@ -5,8 +5,11 @@ Builds and evaluates an XGBClassifier for stock price direction prediction.
 
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 from xgboost import XGBClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 from typing import Tuple
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
@@ -272,6 +275,31 @@ def evaluate_model(
     return metrics
 
 
+def calculate_strategy_returns(
+    probabilities: pd.Series,
+    daily_returns: pd.Series,
+    threshold: float
+) -> Tuple[pd.Series, pd.Series]:
+    """Convert model probabilities into a lagged trading signal and cumulative returns."""
+    signal = (probabilities >= threshold).astype(int).shift(1).fillna(0)
+    strategy_returns = daily_returns * signal
+    cumulative_returns = (1 + strategy_returns).cumprod() - 1
+    return strategy_returns, cumulative_returns
+
+
+def calculate_risk_metrics(strategy_returns: pd.Series) -> Tuple[float, float]:
+    """Return annualized Sharpe ratio and maximum drawdown for a return series."""
+    if strategy_returns.std() == 0:
+        sharpe_ratio = np.nan
+    else:
+        sharpe_ratio = np.sqrt(252) * (strategy_returns.mean() / strategy_returns.std())
+
+    cumulative_value = (1 + strategy_returns).cumprod()
+    drawdown = 1 - (cumulative_value / cumulative_value.cummax())
+    max_drawdown = drawdown.max()
+    return sharpe_ratio, max_drawdown
+
+
 def backtest_strategy(model: XGBClassifier, X_test: pd.DataFrame) -> pd.DataFrame:
     """
     Generate a backtest DataFrame comparing buy-and-hold returns with
@@ -290,6 +318,76 @@ def backtest_strategy(model: XGBClassifier, X_test: pd.DataFrame) -> pd.DataFram
         (1 + backtest_df['Strategy_Returns']).cumprod() - 1
     )
     return backtest_df
+
+
+def plot_strategy_comparison(
+    daily_returns: pd.Series,
+    manual_strategy_returns: pd.Series,
+    cumulative_manual: pd.Series,
+    walkforward_strategy_returns: pd.Series,
+    cumulative_walkforward: pd.Series,
+    output_path: str = 'models/strategy_comparison.png'
+) -> None:
+    """Plot cumulative returns for buy-and-hold versus both AI strategies."""
+    cumulative_buy_hold = (1 + daily_returns).cumprod() - 1
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.plot(
+        daily_returns.index,
+        cumulative_buy_hold,
+        color='gray',
+        alpha=0.6,
+        linewidth=1.8,
+        label='Buy & Hold'
+    )
+    ax.plot(
+        cumulative_manual.index,
+        cumulative_manual,
+        color='green',
+        linewidth=1.8,
+        label='AI Strategy (Manual Tune - High Return)'
+    )
+    ax.plot(
+        cumulative_walkforward.index,
+        cumulative_walkforward,
+        color='blue',
+        linewidth=1.8,
+        label='AI Strategy (Walk-Forward Tune - Low Risk)'
+    )
+
+    buy_hold_sharpe, buy_hold_drawdown = calculate_risk_metrics(daily_returns)
+    manual_sharpe, manual_drawdown = calculate_risk_metrics(manual_strategy_returns)
+    walkforward_sharpe, walkforward_drawdown = calculate_risk_metrics(walkforward_strategy_returns)
+
+    metrics_text = (
+        f'Buy & Hold\nSharpe: {buy_hold_sharpe:.2f}\nMax Drawdown: {buy_hold_drawdown:.2%}\n\n'
+        f'Manual Tune\nSharpe: {manual_sharpe:.2f}\nMax Drawdown: {manual_drawdown:.2%}\n\n'
+        f'Walk-Forward Tune\nSharpe: {walkforward_sharpe:.2f}\nMax Drawdown: {walkforward_drawdown:.2%}'
+    )
+    ax.text(
+        0.02,
+        0.02,
+        metrics_text,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment='bottom',
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+    )
+
+    ax.set_title('Cumulative Returns: Buy & Hold vs AI Strategy Variants')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Cumulative Return')
+    ax.legend(loc='upper left')
+    ax.grid(alpha=0.3)
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300)
+    print(f"[OK] Strategy comparison plot saved to: {output_path}")
+    plt.show()
 
 
 def plot_backtest(backtest_df: pd.DataFrame, output_path: str = 'models/backtest_returns.png'):
@@ -460,10 +558,10 @@ def main():
         X, y, test_size=0.2
     )
     
-    # Step 4: Train model
-    print("\n\nSTEP 4: Model Initialization & Training")
+    # Step 4: Train manual threshold model
+    print("\n\nSTEP 4: Manual Threshold Model")
     print("-" * 80)
-    model = train_xgboost_model(
+    manual_model = train_xgboost_model(
         X_train, y_train,
         n_estimators=100,
         learning_rate=0.05,
@@ -471,34 +569,95 @@ def main():
         subsample=0.8,
         random_state=42
     )
-    
-    # Step 5: Evaluate model
-    print("\n\nSTEP 5: Model Evaluation")
+
+    manual_probabilities = pd.Series(
+        manual_model.predict_proba(X_test)[:, 1],
+        index=X_test.index,
+        name='manual_probabilities'
+    )
+    Manual_Strategy_Returns, Cumulative_Returns_Manual = calculate_strategy_returns(
+        manual_probabilities,
+        X_test['Daily_Return'],
+        threshold=0.47
+    )
+
+    # Step 5: Walk-forward hyperparameter tuning
+    print("\n\nSTEP 5: Walk-Forward Hyperparameter Tuning")
     print("-" * 80)
-    metrics = evaluate_model(model, X_test, y_test, feature_names=feature_cols)
-    
-    # Step 6: Print evaluation report
+    search_feature_cols = [col for col in feature_cols if col != 'Volume_Change']
+    X_train_search = X_train[search_feature_cols].copy()
+    X_test_search = X_test[search_feature_cols].copy()
+
+    tscv = TimeSeriesSplit(n_splits=5)
+    random_search = RandomizedSearchCV(
+        estimator=XGBClassifier(
+            random_state=42,
+            n_jobs=-1,
+            eval_metric='logloss'
+        ),
+        param_distributions={
+            'n_estimators': [50, 100, 200],
+            'max_depth': [3, 4, 5],
+            'learning_rate': [0.01, 0.05, 0.1]
+        },
+        n_iter=10,
+        cv=tscv,
+        scoring='accuracy',
+        random_state=42,
+        n_jobs=-1,
+        verbose=0
+    )
+    random_search.fit(X_train_search, y_train)
+    print(f"Best parameters: {random_search.best_params_}")
+
+    walkforward_model = random_search.best_estimator_
+    walkforward_model.fit(X_train_search, y_train)
+
+    walkforward_probabilities = pd.Series(
+        walkforward_model.predict_proba(X_test_search)[:, 1],
+        index=X_test.index,
+        name='walkforward_probabilities'
+    )
+    WalkForward_Strategy_Returns, Cumulative_Returns_WalkForward = calculate_strategy_returns(
+        walkforward_probabilities,
+        X_test['Daily_Return'],
+        threshold=0.50
+    )
+
+    # Step 6: Evaluate models and print report
+    print("\n\nSTEP 6: Model Evaluation")
+    print("-" * 80)
+    metrics = evaluate_model(manual_model, X_test, y_test, feature_names=feature_cols)
     print_evaluation_report(metrics, y_test)
 
     # Step 6.5: Plot feature importance
     print("\n\nSTEP 6.5: Plot Feature Importance")
     print("-" * 80)
-    
-    
-    # Step 6.75: Backtest strategy
-    print("\n\nSTEP 6.75: Backtest Strategy")
-    print("-" * 80)
-    backtest_df = backtest_strategy(model, X_test)
-    plot_backtest(backtest_df, output_path='models/backtest_returns.png')
 
-    
+    # Step 6.75: Backtest strategy comparison
+    print("\n\nSTEP 6.75: Strategy Comparison")
+    print("-" * 80)
+    plot_strategy_comparison(
+        X_test['Daily_Return'],
+        Manual_Strategy_Returns,
+        Cumulative_Returns_Manual,
+        WalkForward_Strategy_Returns,
+        Cumulative_Returns_WalkForward,
+        output_path='models/strategy_comparison.png'
+    )
+
     return {
-        'model': model,
+        'model': manual_model,
+        'walkforward_model': walkforward_model,
         'X_train': X_train,
         'X_test': X_test,
         'y_train': y_train,
         'y_test': y_test,
-        'metrics': metrics
+        'metrics': metrics,
+        'Manual_Strategy_Returns': Manual_Strategy_Returns,
+        'Cumulative_Returns_Manual': Cumulative_Returns_Manual,
+        'WalkForward_Strategy_Returns': WalkForward_Strategy_Returns,
+        'Cumulative_Returns_WalkForward': Cumulative_Returns_WalkForward
     }
 
 
