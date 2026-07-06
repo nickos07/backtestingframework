@@ -15,40 +15,11 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import os
 
+from data_acquisition import download_stock_data
 from feature_engineering import TechnicalIndicators
-
-
-def load_cleaned_data(ticker: str, data_dir: str = 'data') -> pd.DataFrame:
-    """
-    Load cleaned stock data from CSV.
-    
-    Parameters:
-    -----------
-    ticker : str
-        Stock ticker symbol
-    data_dir : str, default='data'
-        Directory containing cleaned data files
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Cleaned DataFrame with technical indicators
-    """
-    
-    filepath = f"{data_dir}/{ticker}_cleaned.csv"
-    
-    try:
-        df = pd.read_csv(filepath, index_col=0)
-        df.index = pd.to_datetime(df.index, format='%Y-%m-%d', errors='coerce')
-        print(f"[OK] Loaded cleaned data for {ticker}")
-        print(f"  Shape: {df.shape}")
-        print(f"  Date range: {df.index[0].date()} to {df.index[-1].date()}")
-        return df
-    
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Cleaned data file not found: {filepath}")
-    except Exception as e:
-        raise Exception(f"Error loading data: {str(e)}")
+from target_variable import TargetVariableGenerator
+from data_cleaning import DataCleaner
+from visualization import plot_strategy_comparison
 
 
 def separate_features_and_target(
@@ -81,14 +52,10 @@ def separate_features_and_target(
     
     print(f"\nFeature Columns: {feature_columns}")
     
-    # Create target if not present: 1 if next day's close > today's close, 0 otherwise
     if target_column not in df.columns:
-        print(f"Target Column: {target_column} (created from price direction)")
-        tomorrow_close = df['Close'].shift(-1)
-        y = (tomorrow_close > df['Close']).astype(int)
-    else:
-        print(f"Target Column: {target_column}")
-        y = df[target_column].copy()
+        raise ValueError(f"Target column '{target_column}' is required in the DataFrame.")
+    print(f"Target Column: {target_column}")
+    y = df[target_column].copy()
     
     # Extract features
     X = df[feature_columns].copy()
@@ -287,141 +254,7 @@ def calculate_strategy_returns(
     return strategy_returns, cumulative_returns
 
 
-def calculate_risk_metrics(strategy_returns: pd.Series) -> Tuple[float, float]:
-    """Return annualized Sharpe ratio and maximum drawdown for a return series."""
-    if strategy_returns.std() == 0:
-        sharpe_ratio = np.nan
-    else:
-        sharpe_ratio = np.sqrt(252) * (strategy_returns.mean() / strategy_returns.std())
 
-    cumulative_value = (1 + strategy_returns).cumprod()
-    drawdown = 1 - (cumulative_value / cumulative_value.cummax())
-    max_drawdown = drawdown.max()
-    return sharpe_ratio, max_drawdown
-
-
-def backtest_strategy(model: XGBClassifier, X_test: pd.DataFrame) -> pd.DataFrame:
-    """
-    Generate a backtest DataFrame comparing buy-and-hold returns with
-    strategy returns based on the previous day's model signal.
-    """
-    backtest_df = X_test.copy()
-    backtest_df['Predicted_Signal'] = model.predict(X_test)
-    backtest_df['Buy_and_Hold_Returns'] = backtest_df['Daily_Return']
-    backtest_df['Strategy_Returns'] = (
-        backtest_df['Buy_and_Hold_Returns'] * backtest_df['Predicted_Signal'].shift(1).fillna(0)
-    )
-    backtest_df['Cumulative_Buy_and_Hold'] = (
-        (1 + backtest_df['Buy_and_Hold_Returns']).cumprod() - 1
-    )
-    backtest_df['Cumulative_Strategy'] = (
-        (1 + backtest_df['Strategy_Returns']).cumprod() - 1
-    )
-    return backtest_df
-
-
-def plot_strategy_comparison(
-    daily_returns: pd.Series,
-    manual_strategy_returns: pd.Series,
-    cumulative_manual: pd.Series,
-    walkforward_strategy_returns: pd.Series,
-    cumulative_walkforward: pd.Series,
-    output_path: str = 'models/strategy_comparison.png'
-) -> None:
-    """Plot cumulative returns for buy-and-hold versus both AI strategies."""
-    cumulative_buy_hold = (1 + daily_returns).cumprod() - 1
-
-    fig, ax = plt.subplots(figsize=(14, 8))
-    ax.plot(
-        daily_returns.index,
-        cumulative_buy_hold,
-        color='gray',
-        alpha=0.6,
-        linewidth=1.8,
-        label='Buy & Hold'
-    )
-    ax.plot(
-        cumulative_manual.index,
-        cumulative_manual,
-        color='green',
-        linewidth=1.8,
-        label='AI Strategy (Manual Tune - High Return)'
-    )
-    ax.plot(
-        cumulative_walkforward.index,
-        cumulative_walkforward,
-        color='blue',
-        linewidth=1.8,
-        label='AI Strategy (Walk-Forward Tune - Low Risk)'
-    )
-
-    buy_hold_sharpe, buy_hold_drawdown = calculate_risk_metrics(daily_returns)
-    manual_sharpe, manual_drawdown = calculate_risk_metrics(manual_strategy_returns)
-    walkforward_sharpe, walkforward_drawdown = calculate_risk_metrics(walkforward_strategy_returns)
-
-    metrics_text = (
-        f'Buy & Hold\nSharpe: {buy_hold_sharpe:.2f}\nMax Drawdown: {buy_hold_drawdown:.2%}\n\n'
-        f'Manual Tune\nSharpe: {manual_sharpe:.2f}\nMax Drawdown: {manual_drawdown:.2%}\n\n'
-        f'Walk-Forward Tune\nSharpe: {walkforward_sharpe:.2f}\nMax Drawdown: {walkforward_drawdown:.2%}'
-    )
-    ax.text(
-        0.02,
-        0.02,
-        metrics_text,
-        transform=ax.transAxes,
-        fontsize=10,
-        verticalalignment='bottom',
-        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
-    )
-
-    ax.set_title('Cumulative Returns: Buy & Hold vs AI Strategy Variants')
-    ax.set_xlabel('Date')
-    ax.set_ylabel('Cumulative Return')
-    ax.legend(loc='upper left')
-    ax.grid(alpha=0.3)
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path, dpi=300)
-    print(f"[OK] Strategy comparison plot saved to: {output_path}")
-    plt.show()
-
-
-def plot_backtest(backtest_df: pd.DataFrame, output_path: str = 'models/backtest_returns.png'):
-    """
-    Plot cumulative returns for buy-and-hold versus the strategy and save to PNG.
-    """
-    plt.figure(figsize=(12, 6))
-    plt.plot(
-        backtest_df.index,
-        backtest_df['Cumulative_Buy_and_Hold'],
-        color='gray',
-        label='Buy & Hold'
-    )
-    plt.plot(
-        backtest_df.index,
-        backtest_df['Cumulative_Strategy'],
-        color='green',
-        label='XGBoost Strategy'
-    )
-    plt.title('Backtest: Buy & Hold vs XGBoost Strategy')
-    plt.xlabel('Date')
-    plt.ylabel('Cumulative Return')
-    plt.legend()
-    plt.grid(alpha=0.3)
-    ax = plt.gca()
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    plt.savefig(output_path, dpi=300)
-    print(f"[OK] Backtest plot saved to: {output_path}")
-    plt.show()
 
 
 def print_evaluation_report(metrics: dict, y_test: pd.Series):
@@ -519,93 +352,68 @@ def save_model_results(
 
 
 def main():
-    """Main execution function"""
-    
     print("\n" + "="*80)
-    print("PHASE 3: MODEL SELECTION AND TRAINING")
-    print("Stock Price Direction Prediction - XGBoost Classifier")
+    print("UNIFIED ML PIPELINE: Stock Price Direction Prediction")
     print("="*80)
-    
-    # Step 1: Load data
-    print("\n\nSTEP 1: Loading Data")
-    print("-" * 80)
-    df = load_cleaned_data(ticker='AAPL', data_dir='data')
 
-    # Step 1.5: Ensure advanced technical features exist
-    print("\n\nSTEP 1.5: Generating Advanced Technical Features")
-    print("-" * 80)
+    # 1. ACQUIRE DATA
+    print("\n--- Phase 1: Data Acquisition ---")
+    stock_data = download_stock_data(tickers=['AAPL'], period_years=5)
+    df = stock_data['AAPL']
+
+    # 2. ENGINEER FEATURES
+    print("\n--- Phase 2: Feature Engineering ---")
     df = TechnicalIndicators.add_technical_features(
-        df,
-        price_column='Close',
-        sma_windows=[20, 50],
-        rsi_period=14,
-        add_returns=True
+        df, price_column='Close', sma_windows=[20, 50], rsi_period=14, add_returns=True
     )
 
-    # Step 2: Separate features and target
-    print("\n\nSTEP 2: Feature and Target Separation")
-    print("-" * 80)
+    # 3. CREATE TARGET VARIABLE
+    print("\n--- Phase 3: Target Generation ---")
+    df = TargetVariableGenerator.add_target_variable(
+        df, price_column='Close', drop_na=False
+    )
+
+    # 4. CLEAN DATA
+    print("\n--- Phase 4: Data Cleaning ---")
+    df = DataCleaner.clean_dataset(df, remove_nan=True, validate=True, verbose=True)
+
+    # 5. FEATURE AND TARGET SEPARATION
+    print("\n--- Phase 5: Feature and Target Separation ---")
     feature_cols = [
         'SMA_20', 'SMA_50', 'RSI_14', 'Daily_Return',
         'MACD', 'MACD_Signal', 'BB_Upper', 'BB_Lower', 'Volume_Change'
     ]
     X, y = separate_features_and_target(df, feature_columns=feature_cols)
-    
-    # Step 3: Chronological train/test split
-    print("\n\nSTEP 3: Chronological Train/Test Split")
-    print("-" * 80)
-    X_train, X_test, y_train, y_test = chronological_train_test_split(
-        X, y, test_size=0.2
-    )
-    
-    # Step 4: Train manual threshold model
-    print("\n\nSTEP 4: Manual Threshold Model")
-    print("-" * 80)
-    manual_model = train_xgboost_model(
-        X_train, y_train,
-        n_estimators=100,
-        learning_rate=0.05,
-        max_depth=3,
-        subsample=0.8,
-        random_state=42
-    )
 
+    # 6. TRAIN/TEST SPLIT
+    print("\n--- Phase 6: Chronological Train/Test Split ---")
+    X_train, X_test, y_train, y_test = chronological_train_test_split(X, y, test_size=0.2)
+
+    # 7. MANUAL MODEL (Aggressive High Return)
+    print("\n--- Phase 7: Manual Threshold Model ---")
+    manual_model = train_xgboost_model(
+        X_train, y_train, n_estimators=100, learning_rate=0.05, max_depth=3, subsample=0.8, random_state=42
+    )
     manual_probabilities = pd.Series(
-        manual_model.predict_proba(X_test)[:, 1],
-        index=X_test.index,
-        name='manual_probabilities'
+        manual_model.predict_proba(X_test)[:, 1], index=X_test.index, name='manual_probabilities'
     )
     Manual_Strategy_Returns, Cumulative_Returns_Manual = calculate_strategy_returns(
-        manual_probabilities,
-        X_test['Daily_Return'],
-        threshold=0.47
+        manual_probabilities, X_test['Daily_Return'], threshold=0.47
     )
 
-    # Step 5: Walk-forward hyperparameter tuning
-    print("\n\nSTEP 5: Walk-Forward Hyperparameter Tuning")
-    print("-" * 80)
+    # 8. WALK-FORWARD MODEL (Conservative Low Risk)
+    print("\n--- Phase 8: Walk-Forward Hyperparameter Tuning ---")
     search_feature_cols = [col for col in feature_cols if col != 'Volume_Change']
     X_train_search = X_train[search_feature_cols].copy()
     X_test_search = X_test[search_feature_cols].copy()
 
     tscv = TimeSeriesSplit(n_splits=5)
     random_search = RandomizedSearchCV(
-        estimator=XGBClassifier(
-            random_state=42,
-            n_jobs=-1,
-            eval_metric='logloss'
-        ),
+        estimator=XGBClassifier(random_state=42, n_jobs=-1, eval_metric='logloss'),
         param_distributions={
-            'n_estimators': [50, 100, 200],
-            'max_depth': [3, 4, 5],
-            'learning_rate': [0.01, 0.05, 0.1]
+            'n_estimators': [50, 100, 200], 'max_depth': [3, 4, 5], 'learning_rate': [0.01, 0.05, 0.1]
         },
-        n_iter=10,
-        cv=tscv,
-        scoring='accuracy',
-        random_state=42,
-        n_jobs=-1,
-        verbose=0
+        n_iter=10, cv=tscv, scoring='accuracy', random_state=42, n_jobs=-1, verbose=0
     )
     random_search.fit(X_train_search, y_train)
     print(f"Best parameters: {random_search.best_params_}")
@@ -614,52 +422,29 @@ def main():
     walkforward_model.fit(X_train_search, y_train)
 
     walkforward_probabilities = pd.Series(
-        walkforward_model.predict_proba(X_test_search)[:, 1],
-        index=X_test.index,
-        name='walkforward_probabilities'
+        walkforward_model.predict_proba(X_test_search)[:, 1], index=X_test.index, name='walkforward_probabilities'
     )
     WalkForward_Strategy_Returns, Cumulative_Returns_WalkForward = calculate_strategy_returns(
-        walkforward_probabilities,
-        X_test['Daily_Return'],
-        threshold=0.50
+        walkforward_probabilities, X_test['Daily_Return'], threshold=0.50
     )
 
-    # Step 6: Evaluate models and print report
-    print("\n\nSTEP 6: Model Evaluation")
-    print("-" * 80)
+    # 9. EVALUATION & PLOTTING
+    print("\n--- Phase 9: Evaluation & Comparison ---")
     metrics = evaluate_model(manual_model, X_test, y_test, feature_names=feature_cols)
     print_evaluation_report(metrics, y_test)
 
-    # Step 6.5: Plot feature importance
-    print("\n\nSTEP 6.5: Plot Feature Importance")
-    print("-" * 80)
-
-    # Step 6.75: Backtest strategy comparison
-    print("\n\nSTEP 6.75: Strategy Comparison")
-    print("-" * 80)
     plot_strategy_comparison(
         X_test['Daily_Return'],
-        Manual_Strategy_Returns,
-        Cumulative_Returns_Manual,
-        WalkForward_Strategy_Returns,
-        Cumulative_Returns_WalkForward,
+        Manual_Strategy_Returns, Cumulative_Returns_Manual,
+        WalkForward_Strategy_Returns, Cumulative_Returns_WalkForward,
         output_path='models/strategy_comparison.png'
     )
 
-    return {
-        'model': manual_model,
-        'walkforward_model': walkforward_model,
-        'X_train': X_train,
-        'X_test': X_test,
-        'y_train': y_train,
-        'y_test': y_test,
-        'metrics': metrics,
-        'Manual_Strategy_Returns': Manual_Strategy_Returns,
-        'Cumulative_Returns_Manual': Cumulative_Returns_Manual,
-        'WalkForward_Strategy_Returns': WalkForward_Strategy_Returns,
-        'Cumulative_Returns_WalkForward': Cumulative_Returns_WalkForward
-    }
+    print("\n--- Phase 10: Saving Model ---")
+    save_model_results(walkforward_model, metrics, y_test, output_dir='models')
+
+    print("\n✓ Pipeline Execution Complete!")
 
 
 if __name__ == "__main__":
-    results = main()
+    main()

@@ -11,46 +11,13 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
 from typing import Tuple
+import os
 
 
 # Set style for professional appearance
 sns.set_style("darkgrid")
 plt.rcParams['figure.figsize'] = (14, 10)
 plt.rcParams['font.size'] = 10
-
-
-def load_cleaned_data(ticker: str, data_dir: str = 'data') -> pd.DataFrame:
-    """
-    Load cleaned stock data from CSV.
-    
-    Parameters:
-    -----------
-    ticker : str
-        Stock ticker symbol
-    data_dir : str, default='data'
-        Directory containing cleaned data files
-    
-    Returns:
-    --------
-    pd.DataFrame
-        Cleaned DataFrame with technical indicators
-    """
-    
-    filepath = f"{data_dir}/{ticker}_cleaned.csv"
-    
-    try:
-        df = pd.read_csv(filepath, index_col=0)
-        df.index = pd.to_datetime(df.index, format='%Y-%m-%d', errors='coerce')
-        print(f"✓ Loaded cleaned data for {ticker}")
-        print(f"  Shape: {df.shape}")
-        print(f"  Date range: {df.index[0].date()} to {df.index[-1].date()}")
-        return df
-    
-    except FileNotFoundError:
-        raise FileNotFoundError(f"Cleaned data file not found: {filepath}")
-    except Exception as e:
-        raise Exception(f"Error loading data: {str(e)}")
-
 
 def create_price_trends_plot(
     ax: plt.Axes,
@@ -202,28 +169,25 @@ def format_dates_on_axis(ax: plt.Axes) -> None:
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
 
 
-def create_visualization(ticker: str = 'AAPL', data_dir: str = 'data'):
+def create_visualization(df: pd.DataFrame, ticker: str = 'AAPL'):
     """
     Create comprehensive 3-subplot visualization of stock data.
-    
+
     Parameters:
     -----------
+    df : pd.DataFrame
+        DataFrame with Close, SMA_20, SMA_50, RSI_14, Daily_Return, etc.
     ticker : str, default='AAPL'
-        Stock ticker symbol
-    data_dir : str, default='data'
-        Directory containing cleaned data files
+        Stock ticker symbol for titles
     """
-    
+
     print("\n" + "="*80)
     print("STOCK DATA VISUALIZATION")
     print("="*80 + "\n")
-    
-    # Load cleaned data
-    df = load_cleaned_data(ticker, data_dir)
-    
+
     # Create figure with 3 subplots
     print("\nCreating visualization with 3 subplots...")
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12), 
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(16, 12),
                                          gridspec_kw={'height_ratios': [3, 1.5, 1.5]})
     
     # Plot 1: Price & Trends (largest)
@@ -264,26 +228,116 @@ def create_visualization(ticker: str = 'AAPL', data_dir: str = 'data'):
     
     return fig, (ax1, ax2, ax3), df
 
+def calculate_risk_metrics(strategy_returns: pd.Series) -> Tuple[float, float]:
+    """Return annualized Sharpe ratio and maximum drawdown for a return series."""
+    if strategy_returns.std() == 0 or np.isnan(strategy_returns.std()):
+        sharpe_ratio = np.nan
+    else:
+        sharpe_ratio = np.sqrt(252) * (strategy_returns.mean() / strategy_returns.std())
 
-def main():
-    """Main execution function"""
-    
-    # Create visualization for AAPL
-    fig, axes, df = create_visualization(ticker='AAPL', data_dir='data')
-    
-    # Save the plot
-    output_path = 'data/AAPL_visualization.png'
-    print("\n" + "="*80)
-    print(f"Saving visualization to: {output_path}")
-    print("="*80 + "\n")
-    fig.savefig(output_path, dpi=300, bbox_inches='tight')
-    print(f"✓ Visualization saved successfully!")
-    print(f"\nYou can now view the chart at: {output_path}")
-    print("File size: ", end="")
-    import os
-    file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    print(f"{file_size_mb:.2f} MB")
+    cumulative_value = (1 + strategy_returns).cumprod()
+    drawdown = 1 - (cumulative_value / cumulative_value.cummax())
+    max_drawdown = drawdown.max()
+    return sharpe_ratio, max_drawdown
 
+def plot_strategy_comparison(
+    daily_returns: pd.Series,
+    manual_strategy_returns: pd.Series,
+    cumulative_manual: pd.Series,
+    walkforward_strategy_returns: pd.Series,
+    cumulative_walkforward: pd.Series,
+    output_path: str = 'models/strategy_comparison.png'
+) -> None:
+    """Plot cumulative returns for buy-and-hold versus both AI strategies."""
+    cumulative_buy_hold = (1 + daily_returns).cumprod() - 1
 
-if __name__ == "__main__":
-    main()
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.plot(
+        daily_returns.index,
+        cumulative_buy_hold,
+        color='gray',
+        alpha=0.6,
+        linewidth=1.8,
+        label='Buy & Hold'
+    )
+    ax.plot(
+        cumulative_manual.index,
+        cumulative_manual,
+        color='green',
+        linewidth=1.8,
+        label='AI Strategy (Manual Tune - High Return)'
+    )
+    ax.plot(
+        cumulative_walkforward.index,
+        cumulative_walkforward,
+        color='blue',
+        linewidth=1.8,
+        label='AI Strategy (Walk-Forward Tune - Low Risk)'
+    )
+
+    buy_hold_sharpe, buy_hold_drawdown = calculate_risk_metrics(daily_returns)
+    manual_sharpe, manual_drawdown = calculate_risk_metrics(manual_strategy_returns)
+    walkforward_sharpe, walkforward_drawdown = calculate_risk_metrics(walkforward_strategy_returns)
+
+    metrics_text = (
+        f'Buy & Hold\nSharpe: {buy_hold_sharpe:.2f}\nMax Drawdown: {buy_hold_drawdown:.2%}\n\n'
+        f'Manual Tune\nSharpe: {manual_sharpe:.2f}\nMax Drawdown: {manual_drawdown:.2%}\n\n'
+        f'Walk-Forward Tune\nSharpe: {walkforward_sharpe:.2f}\nMax Drawdown: {walkforward_drawdown:.2%}'
+    )
+    ax.text(
+        0.02,
+        0.02,
+        metrics_text,
+        transform=ax.transAxes,
+        fontsize=10,
+        verticalalignment='bottom',
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
+    )
+
+    ax.set_title('Cumulative Returns: Buy & Hold vs AI Strategy Variants')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Cumulative Return')
+    ax.legend(loc='upper left')
+    ax.grid(alpha=0.3)
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300)
+    print(f"[OK] Strategy comparison plot saved to: {output_path}")
+    plt.show()
+
+def plot_backtest(backtest_df: pd.DataFrame, output_path: str = 'models/backtest_returns.png'):
+    """
+    Plot cumulative returns for buy-and-hold versus the strategy and save to PNG.
+    """
+    plt.figure(figsize=(12, 6))
+    plt.plot(
+        backtest_df.index,
+        backtest_df['Cumulative_Buy_and_Hold'],
+        color='gray',
+        label='Buy & Hold'
+    )
+    plt.plot(
+        backtest_df.index,
+        backtest_df['Cumulative_Strategy'],
+        color='green',
+        label='XGBoost Strategy'
+    )
+    plt.title('Backtest: Buy & Hold vs XGBoost Strategy')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Return')
+    plt.legend()
+    plt.grid(alpha=0.3)
+    ax = plt.gca()
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    plt.savefig(output_path, dpi=300)
+    print(f"[OK] Backtest plot saved to: {output_path}")
+    plt.show()
